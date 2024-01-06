@@ -4,6 +4,21 @@ import { User } from "../models/user.model.js"
 import { uploadFileOnCloudinary } from "../utils/cloudinary.js"
 import { apiResponse } from "../utils/apiResponse.js";
 
+const generateAccessAndRefreshTokens = async(userId) => {
+    try {
+        const user = await User.findById(userId);
+        const accessToken = user.generateAccessToken()
+        const refreshToken = user.generateRefreshToken()
+
+        user.refreshToken = refreshToken
+        await user.save({validateBeforeSave: false}) //Save will save all the fields, we want only refreshToken,
+                                                    //For that we use ^^ 
+        return {accessToken,refreshToken}
+    } catch (error) {
+        throw new apiError(500,'Something went wrong while generating refresh/access token')
+    }
+}
+
 const registerUser = asyncHandler(async (req, res) => {
     //Take form data from req.body
     const { username, password, email, fullName } = req.body
@@ -68,4 +83,74 @@ const registerUser = asyncHandler(async (req, res) => {
     return res.status(201).json(new apiResponse(200, createdUser, "User registered successfully!"))
 })
 
-export { registerUser }
+const loginUser = asyncHandler(async(req,res)=>{
+    const {email,username,password} = req.body
+    if(!(email || username)){
+        throw new apiError(400,"Email or Username is mandatory!")
+    }
+
+    const user = await User.findOne({
+        $or:[{username},{email}]
+    })
+
+    if(!user){
+        throw new apiError(404,"User doesn't exists")
+    }
+
+    const isPasswordValid = user.isPasswordCorrect(password)
+    if(!isPasswordValid){
+        throw new apiError(401,"Password incorrect!")
+    }
+
+    const {refreshToken,accessToken} = await generateAccessAndRefreshTokens(user._id)
+
+    const loggedUser = await User.findById(user._id).select("-password -refreshToken")
+
+    const options = {  //By setting these, the cookies are very secure, the frontend cannot change these
+        httpOnly : true, //It can only be updated from the backend
+        secure : true
+    }
+
+    return res.status(200)
+    .cookie("accessToken",accessToken,options)
+    .cookie("refreshToken",refreshToken,options)
+    .json(
+        new apiResponse(
+            200,
+            {
+                user: loggedUser,accessToken,refreshToken //data field in API response
+            },
+            "User logged in successfully!"
+        ) 
+    )
+        
+})
+
+const logOutUser = asyncHandler(async(req,res)=>{
+    //We have to remove the refresh and access tokens in order to actually log the user out
+    //We need user data inorder to log that user out, for that we need to use a custom middleware
+    User.findByIdAndUpdate(
+        req.user._id,
+        {
+            $set:{
+                refreshToken: undefined //We can set any data from the user
+            }
+        },{
+            new: true //We used it in previous projects as well
+        }
+    )
+
+    const options = {  //By setting these, the cookies are very secure, the frontend cannot change these
+        httpOnly : true, //It can only be updated from the backend
+        secure : true
+    }
+
+    return res
+    .status(200)
+    .clearCookie("accessToken",options)
+    .clearCookie("refreshToken",options)
+    .json(new apiResponse(200,{},"User Logged out successfully!"))
+
+})
+
+export { registerUser,loginUser,logOutUser }
